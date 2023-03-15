@@ -1,4 +1,3 @@
-
 #include<linux/module.h>
 #include<linux/kernel.h>
 #include<linux/mm.h>
@@ -12,8 +11,8 @@
 #include<linux/uaccess.h>
 #include<linux/fs_struct.h>
 #include <asm/tlbflush.h>
+#include<linux/uaccess.h>
 #include<linux/device.h>
-#include <linux/fdtable.h>
 
 //values to read
 #define PID 		0
@@ -21,56 +20,19 @@
 #define	COMM 		2
 #define PPID		3
 #define NVCSW		4
-#define NOT             5
-#define NFO             6
-#define MSU             7
-
-struct hash_node {
-        int tgid;
-        int curid;
-        char buf[16];
-        struct hash_node * next;
-};
-
-#define BUCKETS         1024
-
-struct hash_node* hash_tbl[BUCKETS];
 
 
-static inline int myhash(int tgid){
-        return tgid & (BUCKETS - 1);
-}
 
+static int curid;
 
-static int read_file(void){
-        struct files_struct *files;
-        int count = 0;
-        printk(KERN_INFO "PID: %d entered read_file\n", current->pid);
-        task_lock(current);
-	files = current->files;
-	if (files)
-		atomic_inc(&files->count);
-	task_unlock(current);
-        put_task_struct(current);
-        if(files){
-                printk(KERN_INFO "Going to spin_lock %d\n", files_fdtable(files)->max_fds);
-                spin_lock(&files->file_lock);
-                for(int fd = 0; fd < files_fdtable(files)->max_fds; fd++){
-                        struct file* file = files_lookup_fd_rcu(files, fd);
-                        if(file){
-                                count++;
-                        }
-                }
-                spin_unlock(&files->file_lock);
-        }
-        printk(KERN_INFO "Returned %d count file descriptors\n", count);
-        return count;
-}
+// static struct kobject *cs614_kobj;
 
-static int getans(int id, char* buf){
+static int resolve(char* buf){
+        int id;
         struct task_struct *tsk;
+        id = curid;
         tsk = current;
-        if(id < 0 || id > 7){
+        if(id < 0 || id > 4){
                 return sprintf(buf, "%d", -EINVAL);
         }
         if(id == PID){
@@ -93,64 +55,7 @@ static int getans(int id, char* buf){
                 printk(KERN_INFO "Requested for NVCSW: %lu\n", tsk->nvcsw);
                 return sprintf(buf, "%lu", tsk->nvcsw);
         }
-        else if(id == NOT){
-                printk(KERN_INFO "Requested for NOT: %d\n", get_nr_threads(tsk));
-                return sprintf(buf, "%d", get_nr_threads(tsk));
-        }
-        else if(id == NFO){
-                int nfo = read_file();
-                printk(KERN_INFO "Requested for NFO: %d\n", nfo);
-                return sprintf(buf, "%d", nfo);
-        }
-        else if(id == MSU){
-                printk(KERN_INFO "Requested for MSU: %lu\n", tsk->nvcsw);
-                return sprintf(buf, "%lu", tsk->nvcsw);
-        }
         return 0;
-}
-
-
-static void find_and_update(int id){
-        int key;
-        struct hash_node *next, *cur;
-
-        key = myhash(current->tgid);        
-        if(hash_tbl[key] !=  NULL){
-                cur = hash_tbl[key];
-                while(cur != NULL){
-                        if(cur->tgid == current->tgid){
-                                cur->curid = id;
-                                // getans(id, cur->buf);
-                                return;
-                        }
-                        cur = cur->next;
-                }
-        }
-        next = hash_tbl[key];
-        hash_tbl[key] = (struct hash_node *)kzalloc(sizeof(struct hash_node), GFP_KERNEL);
-        hash_tbl[key]->tgid = current->tgid;
-        hash_tbl[key]->curid = id;
-        // getans(id, hash_tbl[key]->buf);
-        hash_tbl[key]->next = next;
-}
-
-
-static char * resolve(void){
-        int tgid, key;
-        struct hash_node *cur;
-        tgid = current->tgid;
-        key = myhash(tgid);
-        // printk(KERN_INFO "Resolve: PID: %d Hash: %d\n", pid, key);
-        cur = hash_tbl[key];
-        while(cur != NULL){
-                // printk(KERN_INFO "Resolve: Traversing: %d %s\n", cur->pid, cur->buf);
-                if(cur->tgid == tgid){
-                        getans(cur->curid, cur->buf);
-                        return cur->buf;
-                }
-                cur = cur->next;
-        }
-        return NULL;
 }
 
 static ssize_t cs614sys_status(struct kobject *kobj,
@@ -167,9 +72,9 @@ static ssize_t cs614sys_set(struct kobject *kobj,
         int newval, err;
         printk(KERN_INFO "In set func()\n");
         err = kstrtoint(buf, 10, &newval);
-        if (err || newval < 0 || newval > 7 )
+        if (err || newval < 0 || newval > 4 )
                 return -EINVAL;
-        find_and_update(newval);
+        curid = newval;
         return count;
 }
 
@@ -216,19 +121,12 @@ static ssize_t demo_read(struct file *filp,
                            loff_t * offset)
 { 
         int ret;
-        char * temp = NULL;
         printk(KERN_INFO "In read\n");
 	if(length > 16)
 		return -EINVAL;
-        temp = resolve();
-        if(temp == NULL){
-                return -EINVAL;
-        }
-        ret = strlen(temp);
-        printk(KERN_INFO "Data: %s Ret:  %d\n", temp, ret);
-        if(copy_to_user(ubuf, temp, ret)){
+        ret = resolve(d_buf);
+	if(copy_to_user(ubuf, d_buf, ret))
 		return -EINVAL;
-        }
         return ret;
 }
 
@@ -257,6 +155,10 @@ int init_sysfs(void){
 
         int ret;
 
+        // cs614_kobj = kobject_create_and_add("cs614_sysfs", kernel_kobj);
+	// if (!cs614_kobj)
+	// 	return -ENOMEM;
+
         ret = sysfs_create_group (kernel_kobj, &cs614sys_attr_group);
         if(unlikely(ret)){
                 printk(KERN_INFO "cs614: can't create sysfs\n");
@@ -270,7 +172,6 @@ int init_sysfs(void){
 int init_module(void)
 {
         int err;
-
 	printk(KERN_INFO "Hello kernel\n");
 
         if(init_sysfs() < 0){
@@ -313,18 +214,6 @@ error_regdev:
         return  err;
 }
 
-void cleanup_hash(void){
-        struct hash_node * cur, *next;
-        for(int i = 0; i<BUCKETS; i++){
-                cur = hash_tbl[i];
-                while(cur!=NULL){
-                        next= cur->next;
-                        kfree(cur);
-                        cur = next;
-                }
-        }
-}
-
 void cleanup_sysfs(void){
         sysfs_remove_group (kernel_kobj, &cs614sys_attr_group);
         printk(KERN_INFO "Removed the sysfs group\n");   
@@ -332,7 +221,6 @@ void cleanup_sysfs(void){
 
 void cleanup_module(void)
 {
-        cleanup_hash();
         cleanup_sysfs();
 	kfree(d_buf);
         device_destroy(demo_class, MKDEV(major, 0));
