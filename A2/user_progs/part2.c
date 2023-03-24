@@ -65,16 +65,22 @@ int main()
        perror("sysfs write");
        exit(-1);
    }
+
+    sleep(100);
+   if(read(fd_sysfs, &temp, sizeof(temp)) < 0){
+          perror("sysfs read");
+          exit(-1);
+   }
+   
+   
+//    sleep(20);
    //Access the Area
    for(int i=0;i<SIZE;i+=4096){
        char var = ptr[i];
    }
 
    //check kernel thread has finished work and set sysfs to 0
-   if(read(fd_sysfs, &temp, sizeof(temp)) < 0){
-          perror("sysfs read");
-          exit(-1);
-   }
+  
    if(!temp){
        printf("pages are merged\n");
    }
