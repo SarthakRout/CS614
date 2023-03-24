@@ -12,14 +12,18 @@
 #include <linux/uaccess.h>
 #include <linux/fs_struct.h>
 #include <asm/tlbflush.h>
-#include <linux/uaccess.h>
 #include <linux/device.h>
 #include <linux/kthread.h>
 #include <linux/delay.h>
 #include <linux/hugetlb.h>
 #include <linux/vmalloc.h>
+#include <linux/sched/task_stack.h>
+#include<linux/mmap_lock.h>
+#include<linux/mutex.h>
 
 #include "btplus.h"
+
+#define HOOK_SYSCALL_NAME "sys_munmap"
 
 static int major;
 atomic_t device_opened;
@@ -54,6 +58,7 @@ unsigned long (*magic)(const char *name);
 
 unsigned long lookup_kallsyms_lookup_name(void) {
     struct kprobe kp;
+	
     unsigned long addr;
     
     memset(&kp, 0, sizeof(struct kprobe));
@@ -100,6 +105,73 @@ device_write(struct file *filp, const char *buff, size_t len, loff_t *off)
 	return 8;
 }
 
+pte_t* return_pfn(struct mm_struct * mm, unsigned long addr){
+	// unsigned long * pgd,p4d,pud,pmd,ptep,pte;
+	pgd_t*pgd;
+	p4d_t* p4d;
+	pud_t* pud;
+	pmd_t * pmd;
+	pte_t * ptep;
+	pte_t pte;
+
+
+
+	pgd = pgd_offset(mm, addr);
+	if (pgd_none(*pgd) || pgd_bad(*pgd)){
+    printk("Invalid pgd");
+    return NULL;
+	}
+	// printk("Pgd*: %p\n",pgd);
+	// printk("Pgd: %lx\n",pgd->pgd);
+
+	p4d = p4d_offset(pgd, addr);
+	if (p4d_none(*p4d) || p4d_bad(*p4d)){
+		printk("Invalid p4d");
+		return NULL;
+	}
+
+	// printk("P4D*: %p\n",p4d);
+	// printk("P4D*: %lx\n",p4d->p4d);
+
+	pud = pud_offset(p4d, addr);
+	if (pud_none(*pud) || pud_bad(*pud)){
+		printk("Invalid pud");
+		return NULL;
+	}
+	// printk("PUD*: %p\n",pud);
+	// printk("PUD: %lx\n",pud->pud);
+
+
+	pmd = pmd_offset(pud, addr);
+	if (pmd_none(*pmd) || pmd_bad(*pmd)){
+		printk("Invalid pmd");
+		return NULL;
+	}
+
+	// printk("Pmd*: %p\n",pmd);
+	// printk("Pmd: %lx\n",pmd->pmd);
+
+	ptep = pte_offset_map(pmd, addr);
+	if (!ptep){
+		printk("Invalid ptep");
+		return NULL;
+	}
+
+	// printk("Ptep: %p\n",ptep);
+	 pte = *ptep;
+
+	if (pte_present(pte)){
+		// printk("pte_set_flags");
+		// printk("PTEP: %p\n",ptep);
+		// printk("pte is present and pte : %lx\n",ptep->pte);
+		return ptep;
+		
+	}	
+
+	return NULL;
+
+}
+
 unsigned long (*my_move_page_tables) (struct vm_area_struct * ovma, unsigned long old_addr,  struct vm_area_struct * nvma, unsigned long to_addr, unsigned long length, bool val);
 
 int (*my_do_munmap) (struct mm_struct *, unsigned long, size_t, struct list_head *uf);
@@ -127,43 +199,70 @@ int my_mremap(struct vm_area_struct * ovma, unsigned long to_addr){
 		ovma->vm_ops->mremap(nvma);
 	}
 	(*my_do_munmap)(ovma->vm_mm, ovma->vm_start, length, &uf_unmap);
+	__flush_tlb_all();
 	return ret;
 }
+
+
 
 static struct task_struct * kthread_task;
 
 unsigned long HUGE_PAGE_SIZE = (1ULL<<21);
 unsigned long HUGE_PAGE_SHIFT = 21;
 
-static void do_promote(struct mm_struct *mm){
+static void do_promote(struct mm_struct * mm, unsigned long sp){
 	struct vm_area_struct * vma;
 	unsigned long sz, addr;
 	VMA_ITERATOR(vmi, mm, 0);
+	printk(KERN_INFO "In do_promote mm: %p, sp: %lx\n", mm, sp);
+	printk(KERN_INFO "MM PID: %p, %ld\n", mm->pgd, mm->total_vm);
 
-	mmap_write_lock(mm);
 	for_each_vma(vmi, vma){
 		sz = vma->vm_end - vma->vm_start;
 		printk(KERN_INFO "START: %lx, END: %lx DIFF:%lx\n", vma->vm_start, vma->vm_end, sz);
+		if(sp >= vma->vm_start && sp < vma->vm_end){
+			continue;
+		}
 		if(sz < HUGE_PAGE_SIZE){
+			printk("Size of vma is less than 2MB. Skipping this vma.\n");
 			continue;
 		}
 		if (vma->vm_flags & VM_HUGEPAGE) {
             printk("Huge page already exists for this vma. Skipping this vma.\n");
 			continue;
 		}
+		printk(KERN_INFO "Starting to promote vma: %lx, %lx\n", vma->vm_start, vma->vm_end);
 		for(addr = vma->vm_start; addr < vma->vm_end; addr += HUGE_PAGE_SIZE){
 
 			struct page *page = NULL;
             unsigned long pfn;
-            struct page *new_page = NULL;
-            unsigned long new_pfn;
+			void * pagad;
+			bool all_page_allocated = true;
+			
 
 			if(addr + HUGE_PAGE_SIZE > vma->vm_end){
+				printk("Last page of vma. Skipping this page.\n");
 				break;
 			}
 
+			// Check whether all the pages in this region are allocated
+			for(int i = 0; i<512; i++){
+				pte_t * ptep = return_pfn(mm, addr + i * (1<<12));
+				// printk(KERN_INFO "Old Page: %ld, %lu\n", (addr + i * (1<<12)), ( (ptep == NULL) ? 0 :ptep->pte));
+				if(ptep == NULL){
+					printk(KERN_INFO "Skipping this region\n");
+					all_page_allocated = false;
+					break;
+				}
+			}
+			printk(KERN_INFO "All page allocated: %d\n", all_page_allocated);
+			if(!all_page_allocated){
+				continue;
+			}
+			
+
             // Allocate a 2MB page
-            page = alloc_pages(GFP_KERNEL | __GFP_ZERO, HPAGE_SHIFT - PAGE_SHIFT);
+            page = alloc_pages(GFP_KERNEL | __GFP_COMP, HPAGE_SHIFT - PAGE_SHIFT);
             if (!page) {
                 printk(KERN_ERR "Failed to allocate a 2MB page\n");
                 continue;
@@ -171,29 +270,48 @@ static void do_promote(struct mm_struct *mm){
 
             // Get the physical page frame number (pfn) of the allocated page
             pfn = page_to_pfn(page);
+			printk(KERN_INFO "PFN: %lx\n", pfn);
 
             // Copy contents from original page frame to the new page frame
-            new_page = pfn_to_page(pfn);
-            memcpy((void *)page_address(new_page), (void *)addr, HUGE_PAGE_SIZE);
+			pagad = page_address(page);
+			for(int i = 0; i<512; i++){
+				pte_t * ptep = return_pfn(mm, addr + i * (1<<12));
+				if(ptep != NULL){
+					printk(KERN_INFO "New Page: %lu Old Page: %lu\n", (pagad + i * (1<<12)), (addr + i * (1<<12)));
+					memcpy((void *)(pagad + i * (1<<12)), (void *)(addr + i * (1<<12)), (1<<12));
+				}
+			}			
+			continue;
 
             // Remap current vma address to new physical page range
-            new_pfn = pfn + ((addr - vma->vm_start) >> HUGE_PAGE_SHIFT);
-            remap_pfn_range(vma, addr, new_pfn, HUGE_PAGE_SIZE, vma->vm_page_prot);
+            // new_pfn = pfn + ((addr - vma->vm_start) >> HUGE_PAGE_SHIFT);
+            remap_pfn_range(vma, addr, pfn, HUGE_PAGE_SIZE, vma->vm_page_prot);
 			vma->vm_flags |= VM_HUGEPAGE;
 		}
 	}
-	flush_tlb_range(vma, vma->vm_start, vma->vm_end);
-	mmap_write_unlock(mm);
+	printk(KERN_INFO "Promotion done\n");
+	__flush_tlb_all();
+	// mmap_write_unlock(mm);
 }
 
+struct inp {
+	struct mm_struct * mm;
+	unsigned long sp;
+};
+
 static int promote_pages(void * data){
-	struct task_struct * tsk = current;
+	struct inp * ip = (struct inp * ) data;
 	
 	while(!kthread_should_stop()){
-		if(promote){
-			printk(KERN_INFO "Promoting pages\n");
-			do_promote(tsk->mm);
+		if(promote==1){
+			printk(KERN_INFO "Promoting pages with mm: %p, sp: %lx\n", ip->mm, ip->sp);
+			mmap_write_lock(ip->mm);
+			do_promote(ip->mm, ip->sp);
+			mmap_write_unlock(ip->mm);
 			promote = 0;
+		}
+		else{
+			printk(KERN_INFO "Promote: %d\n", promote);
 		}
 		msleep(1000);
 	}
@@ -210,8 +328,11 @@ long device_ioctl(struct file *file,
 	unsigned long to_addr = 0;
 	unsigned length = 0, delta = 0;
 	struct input *ip;
+	struct inp * kp;
 	unsigned index = 0;
 	struct address temp;
+	struct pt_regs * regs;
+
 
 	struct vm_area_struct *vma, *ovma = NULL;
 	struct mm_struct *mm = current->mm;
@@ -307,7 +428,13 @@ long device_ioctl(struct file *file,
 		
 	case IOCTL_PROMOTE_VMA:
 		// Create kthread
-		kthread_task = kthread_create(promote_pages, NULL, "promote-pages");
+
+		regs = task_pt_regs(current);
+		kp = (struct inp *)kmalloc(GFP_KERNEL, sizeof(struct inp));
+		kp->sp = regs->sp;
+		kp->mm = mm;
+		printk("sp: %lx, mm: %p, MM: %p\n", kp->sp, kp->mm, mm);
+		kthread_task = kthread_create(promote_pages, (void *)(kp), "promote-pages");
 		if(IS_ERR(kthread_task)){
 			printk(KERN_ALERT "Couldn't create kernel thread!\n");
 			return -EINVAL;
@@ -366,7 +493,7 @@ static char *demo_devnode(struct device *dev, umode_t *mode)
 static ssize_t sysfs_show(struct kobject *kobj, struct kobj_attribute *attr,
 						  char *buf)
 {
-	pr_info("sysfs read\n");
+	pr_info("kernel sysfs read success\n");
 	return sprintf(buf, "%d", promote);
 }
 
@@ -374,14 +501,18 @@ static ssize_t sysfs_show(struct kobject *kobj, struct kobj_attribute *attr,
 static ssize_t sysfs_store(struct kobject *kobj, struct kobj_attribute *attr,
 						   const char *buf, size_t count)
 {
-	int z;
-	printk("sysfs write\n");
-	sscanf(buf, "%d", &z);
-	promote = z;
+	// int z;
+	// int ret;
+
+	printk("kernel sysfs write success\n");
+	// ret = kstrtoint(buf, 10, &z);
+	// if(ret < 0){
+	// 	printk("Error in kstrtoint\n");
+	// 	return ret;
+	// }
+	promote = 1;
 	return count;
 }
-
-static void (*orig_munmap)(struct vm_area_struct *vma, unsigned long addr, size_t len);
 
 static int break_at(struct vm_area_struct * vma, unsigned long addr){
 	unsigned long page_size = PAGE_SIZE;
@@ -395,7 +526,7 @@ static int break_at(struct vm_area_struct * vma, unsigned long addr){
         page_end = page_start + page_size;
 
         // Allocate a new 4KB page
-        *new_page = alloc_page_vma(GFP_HIGHUSER, vma, page_start);
+        new_page = alloc_page_vma(GFP_HIGHUSER, vma, page_start);
         if (!new_page) {
 			return -1;
             // Failed to allocate page
@@ -415,16 +546,19 @@ static int break_at(struct vm_area_struct * vma, unsigned long addr){
         }
 
         // Flush the TLB cache for the remapped page range
-        flush_tlb_range(vma, page_start, page_end);
+		__flush_tlb_all();
+        // (vma, page_start, page_end);
 	}
-	flush_tlb_range(vma, addr, addr + page_size);
 	
 	return 0;
 }
 
-static void my_munmap(struct vm_area_struct *vma, unsigned long addr, size_t len)
-{
-    /* Do your own processing here */
+static int __kprobes my_munmap(struct kprobe * p, struct pt_regs * reg){
+	// struct vm_area_struct *vma, unsigned long addr, size_t len)
+	struct mm_struct * mm = (struct mm_struct *)reg->di;
+	unsigned long addr = reg->si;
+	size_t len = reg->dx;
+	struct vm_area_struct * vma = find_vma(mm, addr);
 	if(vma->vm_flags & VM_HUGEPAGE){
 		printk("Huge page unmapping function called\n");
 		if((addr - vma->vm_start) % HUGE_PAGE_SIZE){
@@ -438,34 +572,25 @@ static void my_munmap(struct vm_area_struct *vma, unsigned long addr, size_t len
 			}
 		}
 	}
-
-    orig_munmap(vma, addr, len);
+	return 0;
 }
 
 
-void munmap_hook(void){
-	unsigned long munmap_addr = magic("sys_munmap");
+static struct kprobe kp;
+
+int init_munmap_hook(void){
     int ret;
-
-    /* Initialize the ftrace infrastructure */
-    ret = register_ftrace_function(&global_ftrace_ops, NULL, 0);
-    if (ret) {
-        pr_err("Failed to register ftrace function (%d)\n", ret);
-        return ret;
-    }
-
-    /* Set the filter on the munmap function address */
-    ftrace_set_filter_ip(&global_ftrace, munmap_addr, 0, 0);
-
-    /* Set the ftrace filter to my_munmap */
-    ret = ftrace_set_ftrace_filter(&global_ftrace, my_munmap, NULL);
-    if (ret) {
-        pr_err("Failed to set ftrace filter (%d)\n", ret);
-        return ret;
-    }
-
-    /* Get the original munmap function address */
-    orig_munmap = (void (*)(struct vm_area_struct *, unsigned long, size_t)) magic("sys_munmap");
+    printk(KERN_INFO "Setting the probe\n");
+    memset(&kp, 0, sizeof(struct kprobe));
+	kp.symbol_name = "do_munmap";
+	kp.pre_handler = my_munmap;
+	ret = register_kprobe(&kp);
+	if(ret < 0){
+		printk(KERN_ALERT "Failed to register kprobe, returnded %d\n", ret);
+		return ret;
+	}
+    printk(KERN_INFO "Planted kprobe at %lx\n", (unsigned long)kp.addr);
+	return 0;
 }
 
 int init_module(void)
@@ -485,7 +610,10 @@ int init_module(void)
 		return -EINVAL;
 	}
 	kthread_task = NULL;
-	munmap_hook();
+	if(init_munmap_hook()){
+		printk(KERN_ALERT "Failed to init munmap hook\n");
+		return -EINVAL;
+	}
 	printk(KERN_INFO "Hello kernel\n");
 	major = register_chrdev(0, DEVNAME, &fops);
 	err = major;
@@ -545,7 +673,7 @@ void cleanup_module(void)
 	if(kthread_task != NULL){
 		kthread_stop(kthread_task);
 	}
-    unregister_ftrace_function(&global_ftrace_ops, NULL);
+    unregister_kprobe(&kp);
 	device_destroy(demo_class, MKDEV(major, 0));
 	class_destroy(demo_class);
 	unregister_chrdev(major, DEVNAME);
