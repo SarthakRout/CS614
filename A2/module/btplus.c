@@ -316,7 +316,8 @@ static void do_promote(struct mm_struct * mm, unsigned long sp){
             // new_pfn = pfn + ((addr - vma->vm_start) >> HUGE_PAGE_SHIFT);
 			remap_huge_page(mm, addr, pfn);
             // remap_pfn_range(vma, addr, pfn, HUGE_PAGE_SIZE, vma->vm_page_prot);
-			vma->vm_flags |= VM_HUGEPAGE;
+			vma->vm_flags |= 0x20000000;
+			printk("pid : %d vmflags: %lx\n", current->pid, vma->vm_flags);
 		}
 	}
 	printk(KERN_INFO "Promotion done\n");
@@ -547,6 +548,8 @@ static int break_at(struct vm_area_struct * vma, unsigned long addr){
 	int err;
 	struct page* new_page;
 	unsigned long page_start, page_end;
+	char *ker_buff;
+	int ret=0;
 
 	for(int i = 0; i<512; i++){
 		page_start = addr + i * page_size;
@@ -559,13 +562,34 @@ static int break_at(struct vm_area_struct * vma, unsigned long addr){
             // Failed to allocate page
             break;
         }
+		printk("Allocated new page\n");
 
         // Copy data from the huge page to the new page
+		// printk("Page sta  rt value: %c\n", *(char *)page_start);
         new_page_addr = page_address(new_page);
-        memcpy(new_page_addr, (void * ) addr, page_size);
+		ker_buff = kmalloc(4096, GFP_KERNEL);
+		ret = copy_from_user(ker_buff, (void *)page_start, 4096);
+		if (ret)
+		{
+			printk("ret: %d", ret);
+			
+			pr_err("huge page copy from user failed\n");
+			return -1;
+		}
+		printk("kern buff bit : %d\n", *(int *)ker_buff);
+		printk("page_address done\n");
+        memcpy(new_page_addr, (void * ) page_start, page_size);
+
+		// if (copy_to_user(new_page_addr, ker_buff, 4096))
+		// {
+		// 	pr_err("huge page copy fto user failed\n");
+		// 	return -1;
+		// }
+		printk("memcpy done\n");
 
         // Remap the original VMA to the new page
         err = remap_pfn_range(vma, page_start, page_to_pfn(new_page), page_size, vma->vm_page_prot);
+		printk("remap_pfn_range done\n");
         if (err) {
 			printk(KERN_ALERT "Failed to remap page\n");
             // Failed to remap page
@@ -580,24 +604,42 @@ static int break_at(struct vm_area_struct * vma, unsigned long addr){
 	return 0;
 }
 
+int is_pmd_huge_page(struct mm_struct *mm,unsigned long addr){
+	pgd_t * pgd = pgd_offset(mm, addr);
+	p4d_t * p4d = p4d_offset(pgd, addr);
+	pud_t * pud = pud_offset(p4d, addr);
+	pmd_t * pmd = pmd_offset(pud, addr);
+
+	if(pmd && pmd_present(*pmd) && (pmd->pmd & _PAGE_PSE)){
+		return 1;
+	}
+	else return 0;
+}
+
 static int __kprobes my_munmap(struct kprobe * p, struct pt_regs * reg){
 	// struct vm_area_struct *vma, unsigned long addr, size_t len)
 	// struct mm_struct * mm = (struct mm_struct *)reg->di;
 	unsigned long addr = reg->di;
 	size_t len = reg->si;
 	struct vm_area_struct * vma = find_vma(current->mm, addr);
-	printk("munmap called with addr %lx and len %lx", addr, len);
+	// printk("munmap called with addr %lx and len %lx pid: %d vm flags:%lu\n", addr, len,current->pid, vma->vm_flags&VM_HUGEPAGE);
 	if(vma->vm_flags & VM_HUGEPAGE){
-		printk("Huge page unmapping function called\n");
-		if((addr) % HUGE_PAGE_SIZE){
-			if(break_at(vma, addr - ((addr) % HUGE_PAGE_SIZE) )){
-				printk(KERN_ALERT "Failed to break at %lx\n", addr - ((addr) % HUGE_PAGE_SIZE));
+
+		if(is_pmd_huge_page(current->mm, addr)){
+			printk("Huge page unmapping function called with vma start: %lx and vma end: %lx\n", vma->vm_start, vma->vm_end);
+			if((addr) % HUGE_PAGE_SIZE){
+				if(break_at(vma, addr - ((addr) % HUGE_PAGE_SIZE) )){
+					printk(KERN_ALERT "Failed to break at %lx\n", addr - ((addr) % HUGE_PAGE_SIZE));
+				}
+			}
+			if((addr + len) % HUGE_PAGE_SIZE){
+				// if(break_at(vma, addr + len - ((addr + len) % HUGE_PAGE_SIZE) )){
+				// 	printk(KERN_ALERT "Failed to break at %lx\n", addr + len - ((addr + len ) % HUGE_PAGE_SIZE));
+				// }
 			}
 		}
-		if((addr + len) % HUGE_PAGE_SIZE){
-			if(break_at(vma, addr + len - ((addr + len) % HUGE_PAGE_SIZE) )){
-				printk(KERN_ALERT "Failed to break at %lx\n", addr + len - ((addr + len ) % HUGE_PAGE_SIZE));
-			}
+		else{
+			printk("Not a huge page\n");
 		}
 	}
 	return 0;
@@ -610,7 +652,7 @@ int init_munmap_hook(void){
     int ret;
     printk(KERN_INFO "Setting the probe\n");
     memset(&kp, 0, sizeof(struct kprobe));
-	kp.symbol_name = "vm_munmap";
+	kp.symbol_name = "__vm_munmap";
 	kp.pre_handler = my_munmap;
 	ret = register_kprobe(&kp);
 	if(ret < 0){

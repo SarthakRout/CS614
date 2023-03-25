@@ -94,6 +94,6 @@ int main()
    close(fd);
    close(fd_sysfs);
    printf("Calling munmap\n");
-   munmap((void *)ptr, SIZE);
+   munmap((void *)(ptr+(1<<21)), SIZE-(1<<21));
    return 0;
 }
