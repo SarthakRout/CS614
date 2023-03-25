@@ -42,6 +42,8 @@ int main()
         exit(-1);
    }
    
+   printf("PTR: %p\n", ptr);
+
    // creates the kernel thread
    if(ioctl(fd, IOCTL_PROMOTE_VMA, &dummy) < 0){
        printf("2MB promote thread creation failed\n");
@@ -49,9 +51,12 @@ int main()
    }
 
    //Access the Area
+   int co = 0;
    for(int i=0;i<SIZE;i+=4096){
        ptr[i] = 'A';
+       co++;
    }
+   printf("counter: %d\n", co);
    
    int temp = 1;
    int fd_sysfs = open("/sys/kernel/kobject_cs614/promote",O_RDWR);
@@ -66,26 +71,29 @@ int main()
        exit(-1);
    }
 
-    sleep(100);
+   sleep(20);
+
+   //Access the Area
+   int counter = 0;;
+   for(int i=0;i<SIZE;i+=4096){
+       char var = ptr[i];
+       if(var == 'A'){
+        counter++;
+       }
+   }
+    printf("counter: %d\n", counter);
+
+   //check kernel thread has finished work and set sysfs to 0
    if(read(fd_sysfs, &temp, sizeof(temp)) < 0){
           perror("sysfs read");
           exit(-1);
    }
-   
-   
-//    sleep(20);
-   //Access the Area
-   for(int i=0;i<SIZE;i+=4096){
-       char var = ptr[i];
-   }
-
-   //check kernel thread has finished work and set sysfs to 0
-  
    if(!temp){
        printf("pages are merged\n");
    }
    close(fd);
    close(fd_sysfs);
+   printf("Calling munmap\n");
    munmap((void *)ptr, SIZE);
    return 0;
 }
