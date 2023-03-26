@@ -1,0 +1,1 @@
+cmd_/home/manish/Desktop/cs614/CS614/A2/module/btplus.ko := ld -r  -m elf_x86_64 -z noexecstack   --build-id=sha1  -T scripts/module.lds -o /home/manish/Desktop/cs614/CS614/A2/module/btplus.ko /home/manish/Desktop/cs614/CS614/A2/module/btplus.o /home/manish/Desktop/cs614/CS614/A2/module/btplus.mod.o;  true

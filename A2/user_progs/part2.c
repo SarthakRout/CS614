@@ -27,6 +27,8 @@ int main()
 {
    char *ptr;
    char buf[16];
+   int ct;
+   int flag;
    pid_t pid = getpid();
    printf("pid:%u\n",pid);
    unsigned dummy = 1;
@@ -53,7 +55,7 @@ int main()
    //Access the Area
    int co = 0;
    for(int i=0;i<SIZE;i+=4096){
-       ptr[i] = 'A';
+       ptr[i] = 'B';
        co++;
    }
    printf("counter: %d\n", co);
@@ -71,13 +73,11 @@ int main()
        exit(-1);
    }
 
-   sleep(20);
-
    //Access the Area
    int counter = 0;;
    for(int i=0;i<SIZE;i+=4096){
        char var = ptr[i];
-       if(var == 'A'){
+       if(var == 'B'){
         counter++;
        }
    }
@@ -95,5 +95,24 @@ int main()
    close(fd_sysfs);
    printf("Calling munmap\n");
    munmap((void *)(ptr+(1<<21)), SIZE-(1<<21));
+   counter = 0;
+   ct = 0;
+   flag = 0;
+   for(int i = 0; i<512; i++){
+        if(ptr[i*4096] == 'B'){
+            counter++;
+            if((((unsigned long)ptr + i * 4096 ) % (1<<21)) == 0) {
+                flag = 1;
+            }
+            if(!flag){
+                ct++;
+            }
+        }
+        else{
+            printf("ptr[%d]: %d\n", i, ptr[i*4096]);
+        }
+   }
+   printf("counter: %d, ct: %d\n", counter, ct);
+   
    return 0;
 }

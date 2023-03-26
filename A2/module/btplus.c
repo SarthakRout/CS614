@@ -224,27 +224,6 @@ static void remap_huge_page(struct mm_struct * mm, unsigned long addr, unsigned 
 	printk(KERN_INFO "PMD: %lx", pmd_off->pmd);
 }
 
-static void split_huge_page_pmd(struct mm_struct * mm, unsigned long addr, unsigned long pfn, int i){
-	struct page *new_page;
-	pgd_t *pgd_off = pgd_offset(mm, addr);
-	p4d_t *p4d_off = p4d_offset(pgd_off, addr);
-	pud_t *pud_off = pud_offset(p4d_off, addr);
-	pmd_t *pmd_off = pmd_offset(pud_off, addr);
-	pte_t *pte;
-
-	printk(KERN_INFO "In split_huge_page_pmd mm: %p, addr: %lx, pfn: %lx", mm, addr, pfn);
-	// update pmd to point to huge page
-	if(i == 0){
-    	new_page = alloc_pages(GFP_KERNEL, 0);
-		*pmd_off = __pmd(page_to_pfn(new_page) * PAGE_SIZE | _PAGE_PRESENT | _PAGE_RW | _PAGE_USER);
-		printk(KERN_INFO "PMD: %lx", pmd_off->pmd);
-	}
-	pte = pte_offset_map(pmd_off, addr);
-	*pte = __pte(pfn * PAGE_SIZE | _PAGE_PRESENT | _PAGE_RW | _PAGE_USER);
-	if((i%10) == 0){
-		printk(KERN_INFO "PTE: %lx", pte->pte);
-	}
-}
 
 static void do_promote(struct mm_struct * mm, unsigned long sp){
 	struct vm_area_struct * vma;
@@ -582,6 +561,28 @@ static ssize_t sysfs_store(struct kobject *kobj, struct kobj_attribute *attr,
 	return count;
 }
 
+static void split_huge_page_pmd(struct mm_struct * mm, unsigned long addr, unsigned long pfn, int i){
+	struct page *new_page;
+	pgd_t *pgd_off = pgd_offset(mm, addr);
+	p4d_t *p4d_off = p4d_offset(pgd_off, addr);
+	pud_t *pud_off = pud_offset(p4d_off, addr);
+	pmd_t *pmd_off = pmd_offset(pud_off, addr);
+	pte_t *pte;
+
+	// update pmd to point to huge page
+	if(i == 0){
+    	new_page = alloc_pages(GFP_KERNEL, 0);
+		*pmd_off = __pmd(page_to_pfn(new_page) * PAGE_SIZE | _PAGE_PRESENT | _PAGE_RW | _PAGE_USER);
+		printk(KERN_INFO "Allocated new page with PMD: %lx", pmd_off->pmd);
+	}
+	pte = pte_offset_map(pmd_off, addr);
+	*pte = __pte(pfn * PAGE_SIZE | _PAGE_PRESENT | _PAGE_RW | _PAGE_USER);
+	if((i%10) == 0){
+		printk(KERN_INFO "In split_huge_page_pmd mm: %p, addr: %lx, pfn: %lx", mm, addr, pfn);
+		printk(KERN_INFO "PTE: %lx", pte->pte);
+	}
+}
+
 static int break_at(struct vm_area_struct * vma, unsigned long addr){
 	unsigned long page_size = PAGE_SIZE;
 	void * new_page_addr;
@@ -589,7 +590,10 @@ static int break_at(struct vm_area_struct * vma, unsigned long addr){
 	unsigned long page_start, page_end;
 	// char *ker_buff;
 	int ret=0;
+	unsigned long * pfns;
 
+	mmap_write_lock(vma->vm_mm);
+	pfns = kmalloc(512 * sizeof(unsigned long), GFP_KERNEL);
 	for(int i = 0; i<512; i++){
 		page_start = addr + i * page_size;
         page_end = page_start + page_size;
@@ -616,24 +620,18 @@ static int break_at(struct vm_area_struct * vma, unsigned long addr){
 			return -1;
 		}
 		printk("kern buff bit : %d\n", *(int *)new_page_addr);
-        // memcpy(new_page_addr, (void * ) page_start, page_size);
-		// ret = copy_to_user((void *)page_start, ker_buff, 4096);
-		// if (ret)
-		// {
-		// 	printk("ret: %d\n", ret);
-		// 	pr_err("huge page copy fto user failed\n");
-		// 	return -1;
-		// }
 		printk("copy done\n");
-
+		pfns[i] = page_to_pfn(new_page);
+	}
+	for(int i = 0; i<512; i++){
         // Remap the original VMA to the new page
-		split_huge_page_pmd(vma->vm_mm, (addr + i * (1<<12)), page_to_pfn(new_page), i);
-        // err = remap_reg_page(vma, page_start, page_to_pfn(new_page), page_size, vma->vm_page_prot);
+		split_huge_page_pmd(vma->vm_mm, (addr + i * (1<<12)), pfns[i], i);
 		printk("remap_pfn_range done\n");
         // Flush the TLB cache for the remapped page range
-		__flush_tlb_all();
-        // (vma, page_start, page_end);
 	}
+	mmap_write_unlock(vma->vm_mm);
+	kfree(pfns);
+	__flush_tlb_all();
 	
 	return 0;
 }
