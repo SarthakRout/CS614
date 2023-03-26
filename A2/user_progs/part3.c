@@ -16,7 +16,7 @@
 #include <sys/ioctl.h>
 
 #define MAJOR_NUM 100
-#define SIZE (1<<22)
+#define SIZE (1<<23)
 #define NUM_PAGES 1024
 
 #define IOCTL_MVE_VMA_TO _IOR(MAJOR_NUM, 0, char*)

@@ -286,6 +286,7 @@ static void do_promote(struct mm_struct * mm, unsigned long sp){
 				if(ptep == NULL){
 					printk(KERN_INFO "Skipping this region\n");
 					all_page_allocated = false;
+				
 					break;
 				}
 			}
@@ -352,6 +353,25 @@ static int promote_pages(void * data){
 	return 0;
 }
 
+static int remap_custom_pfn(struct mm_struct *mm, unsigned long addr, unsigned long pfn){
+	// unsigned long end = addr + 4096;
+	// unsigned;
+	int err = 0;
+	pgd_t *pgd_off = pgd_offset(mm, addr);
+	p4d_t *p4d_off = p4d_offset(pgd_off, addr);
+	pud_t *pud_off = pud_offset(p4d_off, addr);
+	pmd_t *pmd_off = pmd_offset(pud_off, addr);
+	pte_t * pte_off;
+	if(pmd_off == NULL){
+		return -1;
+	}
+	*pte_off = __pte(pfn << PAGE_SHIFT | _PAGE_PRESENT | _PAGE_RW | _PAGE_USER | _PAGE_ACCESSED | _PAGE_DIRTY);
+	// printk(KERN_INFO "Remapping pfn: %lx, addr: %lx, size: %lx");
+
+	return err;
+}
+
+
 long compact_vma(struct mm_struct *mm, unsigned long vma_addr, unsigned length, struct address *buff){
 	struct vm_area_struct * vm_addr;
 	struct vm_area_struct * vm_area = NULL;
@@ -361,6 +381,9 @@ long compact_vma(struct mm_struct *mm, unsigned long vma_addr, unsigned length, 
 	pte_t ** pfn_array = (pte_t **)kzalloc(sizeof(pte_t) * length, GFP_KERNEL);
 	struct address *ker_buff = (struct address *)kzalloc(sizeof(struct address) * length, GFP_KERNEL);
 	VMA_ITERATOR(vmi, mm, 0);
+	printk("VMA ADDR: %lx", vma_addr);
+
+	
 	
 	mmap_read_lock(mm);
 	for_each_vma(vmi, vm_addr) {
@@ -371,12 +394,13 @@ long compact_vma(struct mm_struct *mm, unsigned long vma_addr, unsigned length, 
 			printk("Start of a vma:%lu  End of the vma:%lu Size of each vma : %lu\n",vm_addr->vm_start,vm_addr->vm_end, vm_addr->vm_end - vm_addr->vm_start);
 		
 	}
-	mmap_read_unlock(mm);
 
 	for(int t = 0; t < length; t++){
 		pfn_array[t] = return_pfn(mm, addr);
 		addr += PAGE_SIZE;
 	}
+	mmap_read_unlock(mm);
+
 
 	addr = vma_addr;
 	for(int i = 0; i < length; i++){
@@ -386,7 +410,7 @@ long compact_vma(struct mm_struct *mm, unsigned long vma_addr, unsigned length, 
 		}
 	}
 
-	while(pfn_array[(glob_addr - vma_addr) >> PAGE_SHIFT] != NULL){
+	while(glob_addr <= vma_addr + length * PAGE_SIZE && pfn_array[(glob_addr - vma_addr) >> PAGE_SHIFT] != NULL){
 		glob_addr += PAGE_SIZE;  
 	}
 
@@ -397,21 +421,27 @@ long compact_vma(struct mm_struct *mm, unsigned long vma_addr, unsigned length, 
 			pfn = (pfn_array[t]->pte << 1) >> 13;
 			down_write(&(mm->mmap_lock));
 			ret = remap_pfn_range(vm_area, glob_addr, pfn, PAGE_SIZE, vm_area->vm_page_prot);
+			// ret = remap_custom_pfn(vm_area->vm_mm, glob_addr, pfn);
+			if(ret){
+				printk("remap_pfn_range failed, %d\n", ret);
+			}
 			up_write(&(mm->mmap_lock));
 			ker_buff[t].to_addr = glob_addr;
+			printk("T: %d, New: %ld\n", t, (glob_addr - vma_addr) >> PAGE_SHIFT);
 			ker_buff[(glob_addr - vma_addr) >> PAGE_SHIFT].to_addr = vma_addr + t * PAGE_SIZE;
+			glob_addr += PAGE_SIZE;
 			while(pfn_array[(glob_addr - vma_addr) >> PAGE_SHIFT] != NULL){
 				glob_addr += PAGE_SIZE;  
 			}
 		}
 	}
 
-	// for(int i = 0; i<20; i++){
-	// 	printk("Old Addr: %lx, New Addr: %lx\n", ker_buff[i].from_addr, ker_buff[i].to_addr);
-	// }
+	for(int i = 0; i<length; i++){
+		printk("Old Addr: %lx, New Addr: %lx\n", ker_buff[i].from_addr, ker_buff[i].to_addr);
+	}
 
 	__flush_tlb_all();
-	printk("User buffer addr: %lx", (unsigned long)buff);
+	printk("User buffer addr: %lx %d\n", (unsigned long)buff, count_allocated);
 	if(copy_to_user(buff, ker_buff, sizeof(struct address) * length)){
 	    pr_err("COMPACT VMA read error 1\n");
 		return ret;
@@ -434,6 +464,7 @@ long device_ioctl(struct file *file,
 	// unsigned index = 0;
 	struct address temp;
 	struct pt_regs * regs;
+	pte_t * ptep;
 
 
 	struct vm_area_struct *vma, *ovma = NULL;
@@ -564,6 +595,23 @@ long device_ioctl(struct file *file,
 	    //index of moved addr in mapping table is , index = (addr-vma_address)>>12
 		printk("Userbuffer addr 1: %lx\n", (unsigned long)buff);
 		compact_vma(current->mm, vma_addr, length, buff);
+		
+
+		// Promotion
+		regs = task_pt_regs(current);
+		kp = (struct inp *)kmalloc(GFP_KERNEL, sizeof(struct inp));
+		kp->sp = regs->sp;
+		kp->mm = mm;
+		printk("sp: %lx, mm: %p, MM: %p\n", kp->sp, kp->mm, mm);
+		kthread_task = kthread_create(promote_pages, (void *)(kp), "promote-pages");
+		if(IS_ERR(kthread_task)){
+			printk(KERN_ALERT "Couldn't create kernel thread!\n");
+			return -EINVAL;
+		}
+
+		wake_up_process(kthread_task);
+		do_promote(mm,regs->sp);
+		printk("promoting 4KB pages to 2mb\n");
 	    vfree(ip);
         return ret;
 
@@ -720,74 +768,6 @@ int is_pmd_huge_page(struct mm_struct *mm,unsigned long addr){
 		return 1;
 	}
 	else return 0;
-}
-
-long compact_vma(struct mm_struct *mm, unsigned long vma_addr, unsigned length, struct address *buff){
-	struct vm_area_struct * vm_addr;
-	struct vm_area_struct * vm_area = NULL;
-	unsigned long addr = vma_addr, pfn, glob_addr = vma_addr;
-
-	int ret =-1, count_allocated = 0;
-	pte_t ** pfn_array = (pte_t **)kzalloc(sizeof(pte_t) * length, GFP_KERNEL);
-	struct address *ker_buff = (struct address *)kzalloc(sizeof(struct address) * length, GFP_KERNEL);
-	VMA_ITERATOR(vmi, mm, 0);
-	
-	mmap_read_lock(mm);
-	for_each_vma(vmi, vm_addr) {
-			if((vm_addr->vm_start <= vma_addr && vm_addr->vm_end >= vma_addr)){
-				vm_area = vm_addr;
-				break;
-			}
-			printk("Start of a vma:%lu  End of the vma:%lu Size of each vma : %lu\n",vm_addr->vm_start,vm_addr->vm_end, vm_addr->vm_end - vm_addr->vm_start);
-		
-	}
-	mmap_read_unlock(mm);
-
-	for(int t = 0; t < length; t++){
-		pfn_array[t] = return_pfn(mm, addr);
-		addr += PAGE_SIZE;
-	}
-
-	addr = vma_addr;
-	for(int i = 0; i < length; i++){
-		ker_buff[i].from_addr = ker_buff[i].to_addr = vma_addr + i * PAGE_SIZE;
-		if(pfn_array[i] != NULL){
-			count_allocated++;
-		}
-	}
-
-	while(pfn_array[(glob_addr - vma_addr) >> PAGE_SHIFT] != NULL){
-		glob_addr += PAGE_SIZE;  
-	}
-
-
-	addr = vma_addr + count_allocated * PAGE_SIZE;
-	for(int t = count_allocated; t < length; t++){
-		if(pfn_array[t] != NULL){
-			pfn = (pfn_array[t]->pte << 1) >> 13;
-			down_write(&(mm->mmap_lock));
-			ret = remap_pfn_range(vm_area, glob_addr, pfn, PAGE_SIZE, vm_area->vm_page_prot);
-			up_write(&(mm->mmap_lock));
-			ker_buff[t].to_addr = glob_addr;
-			ker_buff[(glob_addr - vma_addr) >> PAGE_SHIFT].to_addr = vma_addr + t * PAGE_SIZE;
-			while(pfn_array[(glob_addr - vma_addr) >> PAGE_SHIFT] != NULL){
-				glob_addr += PAGE_SIZE;  
-			}
-		}
-	}
-
-	// for(int i = 0; i<20; i++){
-	// 	printk("Old Addr: %lx, New Addr: %lx\n", ker_buff[i].from_addr, ker_buff[i].to_addr);
-	// }
-
-	__flush_tlb_all();
-	printk("User buffer addr: %lx", (unsigned long)buff);
-	if(copy_to_user(buff, ker_buff, sizeof(struct address) * length)){
-	    pr_err("COMPACT VMA read error 1\n");
-		return ret;
-	} 
-
-	return 0;
 }
 
 static int __kprobes my_munmap(struct kprobe * p, struct pt_regs * reg){
