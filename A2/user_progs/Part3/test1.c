@@ -35,14 +35,6 @@ struct input{
     struct address* buff;
 };
 
-char map_new_to_old(struct address *buff, char * ptr,  unsigned long off){
-    unsigned index = (&ptr[off]-ptr)>>12;
-   unsigned offset = (unsigned long)&ptr[off]&0xfff;
-   struct address * temp = (struct address*)buff+index;
-//    printf("Old: %lx, New: %lx\n", temp->old, temp->new);
-   return *(char*)(temp->new+offset);
-}
-
 int main()
 {
    char *ptr;
@@ -64,21 +56,14 @@ int main()
    }
       
    for(int i=0; i<SIZE; i+=8192){
-        // printf("I; %d\n", i);
-       memset(&ptr[i],'B',4096);
+       memset(&ptr[i],'A',4096);
    }
-
-
-
-   printf("Old: %c %p\n", ptr[4186112], &ptr[4186112]);
    
    ip.addr = (unsigned long)ptr;
    ip.length = (SIZE>>12);
    ip.buff = mapping;
    
    printf("going to compact VMA ptr [%lx], length:%u, mapping:%lx\n",ip.addr,ip.length,(unsigned long)ip.buff);
-
-
 
    if(ioctl(fd, IOCTL_COMPACT_VMA, &ip) < 0){
        printf("VMA merge and move failed\n");
@@ -88,22 +73,13 @@ int main()
    //inspecting old address to new address mapping
    //after compaction following access should work
    //for all virtual pages in VMA range
-   unsigned index = (&ptr[4186112]-ptr)>>12;
-   unsigned offset = (unsigned long)&ptr[4186112]&0xfff;
+   unsigned index = (&ptr[10]-ptr)>>12;
+   unsigned offset = (unsigned long)&ptr[10]&0xfff;
    printf("index into mapping:%u,offset:%u\n",index,offset);
    temp = (struct address*)ip.buff+index;
    printf("old address:%lx, new address:%lx\n",temp->old, temp->new);
    printf("value at new addr:%c\n",*(char*)(temp->new+offset));
-    int ctr =0;
-   for(int i=0; i<SIZE/2; i+=4096){
-        char c = map_new_to_old(ip.buff, ptr, i);
-        if(c == 'B'){
-            ctr++;
-        printf("I; %d, %c\n", i, c);
 
-        }
-   }
-    printf("Counter: %d\n", ctr);
    close(fd);
    munmap((void *)ptr, SIZE);
    return 0;
