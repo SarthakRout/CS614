@@ -143,8 +143,12 @@ pte_t* return_pfn(struct mm_struct * mm, unsigned long addr){
 
 
 	pmd = pmd_offset(pud, addr);
-	if (pmd_none(*pmd) || pmd_bad(*pmd)){
-		printk("Invalid pmd");
+	if (pmd_none(*pmd)){
+		printk("Null PMD");
+		return NULL;
+	} 
+	else if (pmd_bad(*pmd)){
+		printk("Bad pmd %lx\n", pmd->pmd);
 		return NULL;
 	}
 
@@ -220,7 +224,7 @@ static void remap_huge_page(struct mm_struct * mm, unsigned long addr, unsigned 
 
 	printk(KERN_INFO "In remap_huge_page mm: %p, addr: %lx, pfn: %lx", mm, addr, pfn);
 	// update pmd to point to huge page
-	*pmd_off = __pmd(pfn * PAGE_SIZE | _PAGE_PRESENT | _PAGE_RW | _PAGE_USER | _PAGE_PSE);
+	*pmd_off = __pmd(pfn * PAGE_SIZE | _PAGE_PRESENT | _PAGE_RW | _PAGE_USER | _PAGE_PSE | _PAGE_DIRTY | _PAGE_ACCESSED);
 	printk(KERN_INFO "PMD: %lx", pmd_off->pmd);
 }
 
@@ -379,6 +383,7 @@ long device_ioctl(struct file *file,
 	unsigned index = 0;
 	struct address temp;
 	struct pt_regs * regs;
+	pte_t * ptep;
 
 
 	struct vm_area_struct *vma, *ovma = NULL;
@@ -516,6 +521,37 @@ long device_ioctl(struct file *file,
 		}
 		vfree(ip);
 		return ret;
+	case 6:
+		printk("Page Table Walk\n");
+		mmap_read_lock(mm);
+		for_each_vma(vmi, vma)
+		{
+			printk( "START: %lx, END: %lx\n", vma->vm_start, vma->vm_end);
+			if(vma->vm_flags & VM_HUGEPAGE){
+				ptep = return_pfn(mm, (vma->vm_start + (1<<21)) & ~((1<<21) -1));	
+				if(ptep != NULL){
+					printk("PTE: %lx\n", ptep->pte);
+				}
+				else{
+					printk("PTE NULL\n");}
+
+				ptep = return_pfn(mm, ((vma->vm_start + (1<<21)) & ~((1<<21) -1)) - 1);	
+				if(ptep != NULL){
+					printk("PTE: %lx\n", ptep->pte);
+				}
+				else{
+					printk("PTE NULL\n");}	
+
+				ptep = return_pfn(mm, ((vma->vm_start + (1<<21)) & ~((1<<21) -1)) + 1);	
+				if(ptep != NULL){
+					printk("PTE: %lx\n", ptep->pte);
+				}
+				else{
+					printk("PTE NULL\n");}		
+			}
+		}
+		mmap_read_unlock(mm);
+		return 0;
 	}
 	return ret;
 }
@@ -572,11 +608,11 @@ static void split_huge_page_pmd(struct mm_struct * mm, unsigned long addr, unsig
 	// update pmd to point to huge page
 	if(i == 0){
     	new_page = alloc_pages(GFP_KERNEL, 0);
-		*pmd_off = __pmd(page_to_pfn(new_page) * PAGE_SIZE | _PAGE_PRESENT | _PAGE_RW | _PAGE_USER);
+		*pmd_off = __pmd(page_to_pfn(new_page) * PAGE_SIZE | _PAGE_PRESENT | _PAGE_USER | _PAGE_RW | _PAGE_DIRTY | _PAGE_ACCESSED);
 		printk(KERN_INFO "Allocated new page with PMD: %lx", pmd_off->pmd);
 	}
 	pte = pte_offset_map(pmd_off, addr);
-	*pte = __pte(pfn * PAGE_SIZE | _PAGE_PRESENT | _PAGE_RW | _PAGE_USER);
+	*pte = __pte(pfn * PAGE_SIZE | _PAGE_PRESENT | _PAGE_RW | _PAGE_USER | _PAGE_DIRTY | _PAGE_ACCESSED);
 	if((i%10) == 0){
 		printk(KERN_INFO "In split_huge_page_pmd mm: %p, addr: %lx, pfn: %lx", mm, addr, pfn);
 		printk(KERN_INFO "PTE: %lx", pte->pte);
@@ -626,7 +662,7 @@ static int break_at(struct vm_area_struct * vma, unsigned long addr){
 	for(int i = 0; i<512; i++){
         // Remap the original VMA to the new page
 		split_huge_page_pmd(vma->vm_mm, (addr + i * (1<<12)), pfns[i], i);
-		printk("remap_pfn_range done\n");
+		// printk("remap_pfn_range done\n");
         // Flush the TLB cache for the remapped page range
 	}
 	mmap_write_unlock(vma->vm_mm);
@@ -653,27 +689,62 @@ static int __kprobes my_munmap(struct kprobe * p, struct pt_regs * reg){
 	// struct mm_struct * mm = (struct mm_struct *)reg->di;
 	unsigned long addr = reg->di;
 	size_t len = reg->si;
+	unsigned long iad;
 	struct vm_area_struct * vma = find_vma(current->mm, addr);
+	if(vma == NULL || addr < vma->vm_start || addr >= vma->vm_end){
+		return 0;
+	}
 	if(vma->vm_flags & VM_HUGEPAGE){
-	printk("munmap called with addr %lx and len %lx pid: %d vm flags:%lu\n", addr, len,current->pid, vma->vm_flags&VM_HUGEPAGE);
-		if(is_pmd_huge_page(current->mm, addr)){
-			printk("Huge page unmapping function called with vma start: %lx and vma end: %lx\n", vma->vm_start, vma->vm_end);
-			if((addr) % HUGE_PAGE_SIZE){
-				if(break_at(vma, addr - ((addr) % HUGE_PAGE_SIZE) )){
-					printk(KERN_ALERT "Failed to break at %lx\n", addr - ((addr) % HUGE_PAGE_SIZE));
+		printk("munmap called with addr %lx and len %lx pid: %d vm flags:%lu\n", addr, len,current->pid, vma->vm_flags&VM_HUGEPAGE);
+		printk("Huge page unmapping function called with vma start: %lx and vma end: %lx\n", vma->vm_start, vma->vm_end);
+		iad = addr - ((addr) % HUGE_PAGE_SIZE);
+		if(iad < vma->vm_start){
+			iad += HUGE_PAGE_SIZE;
+		}
+		while(iad < addr + len){
+			if(is_pmd_huge_page(current->mm, addr)){
+				if(break_at(vma, iad)){
+					printk(KERN_ALERT "Failed to break at %lx\n", iad);
 				}
 			}
-			if((addr + len) % HUGE_PAGE_SIZE){
-				// if(break_at(vma, addr + len - ((addr + len) % HUGE_PAGE_SIZE) )){
-				// 	printk(KERN_ALERT "Failed to break at %lx\n", addr + len - ((addr + len ) % HUGE_PAGE_SIZE));
-				// }
-			}
-		}
-		else{
-			printk("Not a huge page\n");
+			
+			iad += HUGE_PAGE_SIZE;
 		}
 	}
 	return 0;
+}
+
+static void __kprobes my_post_handler(struct kprobe * p, struct pt_regs * reg, long unsigned ret){
+	unsigned long addr = reg->di;
+	size_t len = reg->si;
+	pte_t * ptep;
+	struct mm_struct *mm = current->mm;
+	struct vm_area_struct * vma = find_vma(current->mm, addr);
+
+	if(vma->vm_flags & VM_HUGEPAGE){
+		printk("post handler called with addr %lx and len %lx pid: %d vm flags:%lu, ret: %lx\n", addr, len,current->pid, vma->vm_flags&VM_HUGEPAGE, ret);
+		printk(KERN_INFO "vma start: %lx, vma end: %lx\n", vma->vm_start, vma->vm_end);
+		ptep = return_pfn(mm, (vma->vm_start + (1<<21)) & ~((1<<21) -1));	
+		if(ptep != NULL){
+			printk("PTE: %lx\n", ptep->pte);
+		}
+		else{
+			printk("PTE NULL\n");}
+
+		ptep = return_pfn(mm, ((vma->vm_start + (1<<21)) & ~((1<<21) -1)) - 1);	
+		if(ptep != NULL){
+			printk("PTE: %lx\n", ptep->pte);
+		}
+		else{
+			printk("PTE NULL\n");}	
+
+		ptep = return_pfn(mm, ((vma->vm_start + (1<<21)) & ~((1<<21) -1)) + 1);	
+		if(ptep != NULL){
+			printk("PTE: %lx\n", ptep->pte);
+		}
+		else{
+			printk("PTE NULL\n");}
+	}
 }
 
 
@@ -685,6 +756,7 @@ int init_munmap_hook(void){
     memset(&kp, 0, sizeof(struct kprobe));
 	kp.symbol_name = "__vm_munmap";
 	kp.pre_handler = my_munmap;
+	kp.post_handler = my_post_handler;
 	ret = register_kprobe(&kp);
 	if(ret < 0){
 		printk(KERN_ALERT "Failed to register kprobe, returnded %d\n", ret);
