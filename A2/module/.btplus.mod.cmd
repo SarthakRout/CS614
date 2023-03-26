@@ -1,1 +1,0 @@
-cmd_/home/manish/Desktop/cs614/CS614/A2/module/btplus.mod := printf '%s\n'   btplus.o | awk '!x[$$0]++ { print("/home/manish/Desktop/cs614/CS614/A2/module/"$$0) }' > /home/manish/Desktop/cs614/CS614/A2/module/btplus.mod
