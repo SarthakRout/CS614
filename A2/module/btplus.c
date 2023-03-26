@@ -369,6 +369,75 @@ static int promote_pages(void * data){
 	return 0;
 }
 
+long compact_vma(struct mm_struct *mm, unsigned long vma_addr, unsigned length, struct address *buff){
+	struct vm_area_struct * vm_addr;
+	struct vm_area_struct * vm_area = NULL;
+	unsigned long addr = vma_addr, pfn, glob_addr = vma_addr;
+
+	int ret =-1, count_allocated = 0;
+	pte_t ** pfn_array = (pte_t **)kzalloc(sizeof(pte_t) * length, GFP_KERNEL);
+	struct address *ker_buff = (struct address *)kzalloc(sizeof(struct address) * length, GFP_KERNEL);
+	VMA_ITERATOR(vmi, mm, 0);
+	
+	mmap_read_lock(mm);
+	for_each_vma(vmi, vm_addr) {
+			if((vm_addr->vm_start <= vma_addr && vm_addr->vm_end >= vma_addr)){
+				vm_area = vm_addr;
+				break;
+			}
+			printk("Start of a vma:%lu  End of the vma:%lu Size of each vma : %lu\n",vm_addr->vm_start,vm_addr->vm_end, vm_addr->vm_end - vm_addr->vm_start);
+		
+	}
+	mmap_read_unlock(mm);
+
+	for(int t = 0; t < length; t++){
+		pfn_array[t] = return_pfn(mm, addr);
+		addr += PAGE_SIZE;
+	}
+
+	addr = vma_addr;
+	for(int i = 0; i < length; i++){
+		ker_buff[i].from_addr = ker_buff[i].to_addr = vma_addr + i * PAGE_SIZE;
+		if(pfn_array[i] != NULL){
+			count_allocated++;
+		}
+	}
+
+	while(pfn_array[(glob_addr - vma_addr) >> PAGE_SHIFT] != NULL){
+		glob_addr += PAGE_SIZE;  
+	}
+
+
+	addr = vma_addr + count_allocated * PAGE_SIZE;
+	for(int t = count_allocated; t < length; t++){
+		if(pfn_array[t] != NULL){
+			pfn = (pfn_array[t]->pte << 1) >> 13;
+			down_write(&(mm->mmap_lock));
+			ret = remap_pfn_range(vm_area, glob_addr, pfn, PAGE_SIZE, vm_area->vm_page_prot);
+			up_write(&(mm->mmap_lock));
+			ker_buff[t].to_addr = glob_addr;
+			ker_buff[(glob_addr - vma_addr) >> PAGE_SHIFT].to_addr = vma_addr + t * PAGE_SIZE;
+			while(pfn_array[(glob_addr - vma_addr) >> PAGE_SHIFT] != NULL){
+				glob_addr += PAGE_SIZE;  
+			}
+		}
+	}
+
+	// for(int i = 0; i<20; i++){
+	// 	printk("Old Addr: %lx, New Addr: %lx\n", ker_buff[i].from_addr, ker_buff[i].to_addr);
+	// }
+
+	__flush_tlb_all();
+	printk("User buffer addr: %lx", (unsigned long)buff);
+	if(copy_to_user(buff, ker_buff, sizeof(struct address) * length)){
+	    pr_err("COMPACT VMA read error 1\n");
+		return ret;
+	} 
+
+	return 0;
+}
+
+
 long device_ioctl(struct file *file,
 				  unsigned int ioctl_num,
 				  unsigned long ioctl_param)
@@ -497,30 +566,26 @@ long device_ioctl(struct file *file,
 		return ret;
 	case IOCTL_COMPACT_VMA:
 		printk("compact VMA\n");
-		ip = (struct input *)vmalloc(sizeof(struct input));
-		if (copy_from_user(ip, (char *)ioctl_param, sizeof(struct input)))
-		{
+	    ip = (struct input*)vmalloc(sizeof(struct input)) ;
+	    if(copy_from_user(ip,(char*)ioctl_param,sizeof(struct input))){
 			pr_err("MVE_MERG_VMA address write error\n");
 			return ret;
 		}
-		vma_addr = ip->addr;
-		length = ip->length;
-		buff = ip->buff;
-		temp.from_addr = vma_addr;
-		temp.to_addr = vma_addr;
-		printk("vma address:%lx, length:%u, buff:%lx\n", vma_addr, length, (unsigned long)buff);
-		// populate old to new address mapping in user buffer.
-		// number of entries in this buffer is equal to the number of
-		// virtual pages in vma address range
-		// index of moved addr in mapping table is , index = (addr-vma_address)>>12
-		index = (vma_addr - vma_addr) >> 12;
-		if (copy_to_user((struct address *)buff + index, &temp, sizeof(struct address)))
-		{
-			pr_err("COMPACT VMA read error\n");
-			return ret;
-		}
-		vfree(ip);
-		return ret;
+	    vma_addr = ip->addr;
+	    length = ip->length;
+	    buff = ip->buff;
+	    temp.from_addr = vma_addr;
+	    temp.to_addr = vma_addr;
+	    printk("vma address:%lx, length:%u, buff:%lx\n",vma_addr,length,(unsigned long)buff);
+	    //populate old to new address mapping in user buffer.
+	    //number of entries in this buffer is equal to the number of 
+	    //virtual pages in vma address range
+	    //index of moved addr in mapping table is , index = (addr-vma_address)>>12
+		printk("Userbuffer addr 1: %lx\n", (unsigned long)buff);
+		compact_vma(current->mm, vma_addr, length, buff);
+	    vfree(ip);
+        return ret;
+
 	case 6:
 		printk("Page Table Walk\n");
 		mmap_read_lock(mm);
