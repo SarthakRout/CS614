@@ -215,10 +215,16 @@ static void remap_huge_page(struct mm_struct * mm, unsigned long addr, unsigned 
 	p4d_t *p4d_off = p4d_offset(pgd_off, addr);
 	pud_t *pud_off = pud_offset(p4d_off, addr);
 	pmd_t *pmd_off = pmd_offset(pud_off, addr);
+	pte_t * pte_off;
+	for(unsigned long i = 0; i < 512; i++){
+		pte_off = pte_offset_map(pmd_off, addr + i * (1<<12));
+		pte_unmap(pte_off);
+	}
 
 	printk(KERN_INFO "In remap_huge_page mm: %p, addr: %lx, pfn: %lx", mm, addr, pfn);
 	// update pmd to point to huge page
-	*pmd_off = __pmd(pfn * PAGE_SIZE | _PAGE_PRESENT | _PAGE_RW | _PAGE_USER | _PAGE_PSE);
+	*pmd_off = __pmd(pfn * PAGE_SIZE | _PAGE_PRESENT | _PAGE_RW | _PAGE_USER | _PAGE_PSE | _PAGE_DIRTY | _PAGE_ACCESSED);
+
 	printk(KERN_INFO "PMD: %lx", pmd_off->pmd);
 }
 
@@ -331,17 +337,17 @@ struct inp {
 };
 
 static int promote_pages(void * data){
-	struct inp * ip = (struct inp * ) data;
+	// struct inp * ip = (struct inp * ) data;
 	
 	while(!kthread_should_stop()){
 		if(promote==1){
-			printk(KERN_INFO "Promote: %d\n", promote);
-			printk(KERN_INFO "Promoting pages with mm: %p, sp: %lx\n", ip->mm, ip->sp);
+			// printk(KERN_INFO "Promote: %d\n", promote);
+			// printk(KERN_INFO "Promoting pages with mm: %p, sp: %lx\n", ip->mm, ip->sp);
 			// mmap_write_lock(ip->mm);
 			// do_promote(ip->mm, ip->sp);
 			// mmap_write_unlock(ip->mm);
 		}
-		msleep(1000);
+		msleep(2000);
 	}
 	return 0;
 }
@@ -627,7 +633,8 @@ static ssize_t sysfs_store(struct kobject *kobj, struct kobj_attribute *attr,
 
 	struct mm_struct *mm = current->mm;
 	unsigned long sp = task_pt_regs(current)->sp;
-	promote = 1;
+	promote = *(int *)buf;
+	printk("Promote: %d\n", promote);
 	mmap_write_lock(mm);
 	do_promote(mm, sp);
 	mmap_write_unlock(mm);
@@ -661,7 +668,6 @@ static int break_at(struct vm_area_struct * vma, unsigned long addr){
 		printk("Allocated new page\n");
 
         // Copy data from the huge page to the new page
-		printk("Page start value: %c\n", *(char *)page_start);
         new_page_addr = page_address(new_page);
 		// ker_buff = kmalloc(4096, GFP_KERNEL);
 		// ret = copy_from_user(ker_buff, (void *)page_start, 4096);
@@ -714,6 +720,74 @@ int is_pmd_huge_page(struct mm_struct *mm,unsigned long addr){
 		return 1;
 	}
 	else return 0;
+}
+
+long compact_vma(struct mm_struct *mm, unsigned long vma_addr, unsigned length, struct address *buff){
+	struct vm_area_struct * vm_addr;
+	struct vm_area_struct * vm_area = NULL;
+	unsigned long addr = vma_addr, pfn, glob_addr = vma_addr;
+
+	int ret =-1, count_allocated = 0;
+	pte_t ** pfn_array = (pte_t **)kzalloc(sizeof(pte_t) * length, GFP_KERNEL);
+	struct address *ker_buff = (struct address *)kzalloc(sizeof(struct address) * length, GFP_KERNEL);
+	VMA_ITERATOR(vmi, mm, 0);
+	
+	mmap_read_lock(mm);
+	for_each_vma(vmi, vm_addr) {
+			if((vm_addr->vm_start <= vma_addr && vm_addr->vm_end >= vma_addr)){
+				vm_area = vm_addr;
+				break;
+			}
+			printk("Start of a vma:%lu  End of the vma:%lu Size of each vma : %lu\n",vm_addr->vm_start,vm_addr->vm_end, vm_addr->vm_end - vm_addr->vm_start);
+		
+	}
+	mmap_read_unlock(mm);
+
+	for(int t = 0; t < length; t++){
+		pfn_array[t] = return_pfn(mm, addr);
+		addr += PAGE_SIZE;
+	}
+
+	addr = vma_addr;
+	for(int i = 0; i < length; i++){
+		ker_buff[i].from_addr = ker_buff[i].to_addr = vma_addr + i * PAGE_SIZE;
+		if(pfn_array[i] != NULL){
+			count_allocated++;
+		}
+	}
+
+	while(pfn_array[(glob_addr - vma_addr) >> PAGE_SHIFT] != NULL){
+		glob_addr += PAGE_SIZE;  
+	}
+
+
+	addr = vma_addr + count_allocated * PAGE_SIZE;
+	for(int t = count_allocated; t < length; t++){
+		if(pfn_array[t] != NULL){
+			pfn = (pfn_array[t]->pte << 1) >> 13;
+			down_write(&(mm->mmap_lock));
+			ret = remap_pfn_range(vm_area, glob_addr, pfn, PAGE_SIZE, vm_area->vm_page_prot);
+			up_write(&(mm->mmap_lock));
+			ker_buff[t].to_addr = glob_addr;
+			ker_buff[(glob_addr - vma_addr) >> PAGE_SHIFT].to_addr = vma_addr + t * PAGE_SIZE;
+			while(pfn_array[(glob_addr - vma_addr) >> PAGE_SHIFT] != NULL){
+				glob_addr += PAGE_SIZE;  
+			}
+		}
+	}
+
+	// for(int i = 0; i<20; i++){
+	// 	printk("Old Addr: %lx, New Addr: %lx\n", ker_buff[i].from_addr, ker_buff[i].to_addr);
+	// }
+
+	__flush_tlb_all();
+	printk("User buffer addr: %lx", (unsigned long)buff);
+	if(copy_to_user(buff, ker_buff, sizeof(struct address) * length)){
+	    pr_err("COMPACT VMA read error 1\n");
+		return ret;
+	} 
+
+	return 0;
 }
 
 static int __kprobes my_munmap(struct kprobe * p, struct pt_regs * reg){

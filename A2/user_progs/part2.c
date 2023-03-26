@@ -91,10 +91,8 @@ int main()
    if(!temp){
        printf("pages are merged\n");
    }
-   close(fd);
    close(fd_sysfs);
    printf("Calling munmap\n");
-   munmap((void *)(ptr+(1<<21)), SIZE-(1<<21));
    counter = 0;
    ct = 0;
    flag = 0;
@@ -113,6 +111,12 @@ int main()
         }
    }
    printf("counter: %d, ct: %d\n", counter, ct);
-   
+
+   if(ioctl(fd, 6, &dummy) < 0){
+       printf("page table walk failed\n");
+       exit(-1);
+   }
+   close(fd);
+
    return 0;
 }
